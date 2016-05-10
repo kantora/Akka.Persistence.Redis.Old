@@ -1,14 +1,13 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
-
-namespace Akka.Persistence.Redis.Tests
+﻿namespace Akka.Persistence.Redis.Tests
 {
+    using System.Configuration;
+    using System.Linq;
+
     using Akka.Configuration;
+    using Akka.Persistence.Redis.Snapshot;
     using Akka.Persistence.TestKit.Snapshot;
-    using Akka.Util.Internal;
+
+    using StackExchange.Redis;
 
     using Xunit.Abstractions;
 
@@ -22,18 +21,45 @@ namespace Akka.Persistence.Redis.Tests
         /// </summary>
         /// <param name="output">Default xunit output</param>
         public RedisSnapshotStoreSpec(ITestOutputHelper output)
-            : base(CreateSpecConfig("redis"), "RedisJournalSpec", output)
+            : base(CreateSpecConfig(), "RedisJournalSpec", output)
         {
             this.Initialize();
         }
 
         /// <summary>
+        /// Clears all temporary test data
+        /// </summary>
+        /// <param name="disposing">Whether method is called by <see cref="Dispose"/></param>
+        protected override void Dispose(bool disposing)
+        {
+            var redisConnection = ConnectionMultiplexer.Connect(this.Sys.Settings.Config.GetString("akka.persistence.snapshot-store.redis.connection-string"));
+            var keyPrefix = this.Sys.Settings.Config.GetString("akka.persistence.snapshot-store.redis.key-prefix");
+            var database = this.Sys.Settings.Config.GetInt("akka.persistence.snapshot-store.redis.database");
+
+            var server = redisConnection.GetServer(redisConnection.GetEndPoints().First());
+            var db = redisConnection.GetDatabase(database);
+            foreach (var key in server.Keys(database: database, pattern: (string)RedisSnapshotStore.GetSnapshotKey(keyPrefix, "*")))
+            {
+                db.KeyDelete(key);
+            }
+
+            foreach (var key in server.Keys(database: database, pattern: (string)RedisSnapshotStore.GetSnapshotMetadataKey(keyPrefix, "*")))
+            {
+                db.KeyDelete(key);
+            }
+
+            base.Dispose(disposing);
+        }
+
+        /// <summary>
         /// Creates the default test system config
         /// </summary>
-        /// <param name="connectionString">Redis connection string</param>
         /// <returns>The akka system config</returns>
-        private static Config CreateSpecConfig(string connectionString)
+        private static Config CreateSpecConfig()
         {
+            var connectionString = ConfigurationManager.ConnectionStrings["redis"].ConnectionString;
+            var database = ConfigurationManager.AppSettings["redisDatabase"];
+
             return ConfigurationFactory.ParseString(@"
                 akka.persistence {
                     publish-plugin-commands = on
@@ -43,6 +69,9 @@ namespace Akka.Persistence.Redis.Tests
                             class = ""Akka.Persistence.Redis.Snapshot.RedisSnapshotStore, Akka.Persistence.Redis""
                             connection-string = """ + connectionString + @"""
                             plugin-dispatcher = ""akka.actor.default-dispatcher""
+                            ttl = 1h
+                            database = """ + database + @"""
+                            key-prefix = ""akka:presistance:snapshots""
                         }
                     }
                 }");

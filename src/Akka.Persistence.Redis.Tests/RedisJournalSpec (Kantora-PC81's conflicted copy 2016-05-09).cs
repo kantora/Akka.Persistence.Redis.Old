@@ -1,14 +1,13 @@
 ﻿namespace Akka.Persistence.Redis.Tests
 {
-    using System.Configuration;
-    using System.Linq;
-
+    using Akka.Actor;
     using Akka.Configuration;
     using Akka.Persistence.Redis.Journal;
     using Akka.Persistence.TestKit.Journal;
 
     using StackExchange.Redis;
 
+    using Xunit;
     using Xunit.Abstractions;
 
     /// <summary>
@@ -21,32 +20,15 @@
         /// </summary>
         /// <param name="output">Default xunit output</param>
         public RedisJournalSpec(ITestOutputHelper output)
-            : base(CreateSpecConfig(), "RedisJournalSpec", output)
+            : base(CreateSpecConfig("192.168.99.100:6379"), "RedisJournalSpec", output)
         {
             this.Initialize();
         }
 
-        /// <summary>
-        /// Clears all temporary test data
-        /// </summary>
-        /// <param name="disposing">Whether method is called by <see cref="Dispose"/></param>
         protected override void Dispose(bool disposing)
         {
             var redisConnection = ConnectionMultiplexer.Connect(this.Sys.Settings.Config.GetString("akka.persistence.journal.redis.connection-string"));
-            var keyPrefix = this.Sys.Settings.Config.GetString("akka.persistence.journal.redis.key-prefix");
-            var database = this.Sys.Settings.Config.GetInt("akka.persistence.journal.redis.database");
-
-            var server = redisConnection.GetServer(redisConnection.GetEndPoints().First());
-            var db = redisConnection.GetDatabase(database);
-            foreach (var key in server.Keys(database: database, pattern: (string)RedisJournal.GetJournalKey(keyPrefix, "*")))
-            {
-                db.KeyDelete(key);
-            }
-
-            foreach (var key in server.Keys(database: database, pattern: (string)RedisJournal.GetJournalSkippedKey(keyPrefix, "*")))
-            {
-                db.KeyDelete(key);
-            }
+            redisConnection.GetServer("192.168.99.100", 6379).FlushDatabase();
 
             base.Dispose(disposing);
         }
@@ -54,12 +36,10 @@
         /// <summary>
         /// Creates the default test system config
         /// </summary>
+        /// <param name="connectionString">Redis connection string</param>
         /// <returns>The akka system config</returns>
-        private static Config CreateSpecConfig()
+        private static Config CreateSpecConfig(string connectionString)
         {
-            var connectionString = ConfigurationManager.ConnectionStrings["redis"].ConnectionString;
-            var database = ConfigurationManager.AppSettings["redisDatabase"];
-
             return ConfigurationFactory.ParseString(@"
                 akka.persistence {
                     publish-plugin-commands = on
@@ -69,9 +49,6 @@
                             class = ""Akka.Persistence.Redis.Journal.RedisJournal, Akka.Persistence.Redis""
                             connection-string = """ + connectionString + @"""
                             plugin-dispatcher = ""akka.actor.default-dispatcher""
-                            ttl = 1h
-                            database = """ + database + @"""
-                            key-prefix = ""akka:presistance:journal""
                         }
                     }
                 }");
