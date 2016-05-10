@@ -2,7 +2,6 @@
 {
     using System.Configuration;
     using System.Linq;
-    using System.Runtime.Remoting.Contexts;
 
     using Akka.Configuration;
     using Akka.Persistence.Redis.Journal;
