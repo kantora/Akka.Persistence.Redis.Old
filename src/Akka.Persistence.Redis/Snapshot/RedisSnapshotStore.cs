@@ -23,13 +23,50 @@
         private IConnectionMultiplexer redisConnection;
 
         /// <summary>
+        /// Redis entries time to live interval. All records will be erased from redis, after specified timeout
+        /// </summary>
+        private TimeSpan? ttl;
+
+        /// <summary>
+        /// The redis database number (-1 for default)
+        /// </summary>
+        private int database;
+
+        /// <summary>
+        /// Storage key prefix
+        /// </summary>
+        private string keyPrefix;
+
+        /// <summary>
+        /// Creates key for redis snapshot datetime
+        /// </summary>
+        /// <param name="prefix">The storage key prefix</param>
+        /// <param name="persistenceId">Akka actor persistence identification</param>
+        /// <returns>The redis key</returns>
+        public static RedisKey GetSnapshotMetadataKey(string prefix, string persistenceId)
+        {
+            return $"{prefix}:metadata:{persistenceId}";
+        }
+
+        /// <summary>
+        /// Creates key for redis snapshot data
+        /// </summary>
+        /// <param name="prefix">The storage key prefix</param>
+        /// <param name="persistenceId">Akka actor persistence identification</param>
+        /// <returns>The redis key</returns>
+        public static RedisKey GetSnapshotKey(string prefix, string persistenceId)
+        {
+            return $"{prefix}:data:{persistenceId}";
+        }
+
+        /// <summary>
         /// Creates key for redis snapshot datetime
         /// </summary>
         /// <param name="persistenceId">Akka actor persistence identification</param>
         /// <returns>The redis key</returns>
-        public static RedisKey GetSnapshotDateKey(string persistenceId)
+        private RedisKey GetSnapshotMetadataKey(string persistenceId)
         {
-            return $"akka:presistance:snapshots:dates:{persistenceId}";
+            return GetSnapshotMetadataKey(this.keyPrefix, persistenceId);
         }
 
         /// <summary>
@@ -37,9 +74,9 @@
         /// </summary>
         /// <param name="persistenceId">Akka actor persistence identification</param>
         /// <returns>The redis key</returns>
-        public static RedisKey GetSnapshotKey(string persistenceId)
+        private RedisKey GetSnapshotKey(string persistenceId)
         {
-            return $"akka:presistance:snapshots:data:{persistenceId}";
+            return GetSnapshotKey(this.keyPrefix, persistenceId);
         }
 
         /// <summary>
@@ -48,11 +85,13 @@
         /// </summary>
         protected override async Task DeleteAsync(SnapshotMetadata metadata)
         {
-            var db = this.redisConnection.GetDatabase();
+            var db = this.redisConnection.GetDatabase(this.database);
             var transaction = db.CreateTransaction();
 #pragma warning disable 4014
-            transaction.HashDeleteAsync(GetSnapshotDateKey(metadata.PersistenceId), metadata.SequenceNr);
-            transaction.HashDeleteAsync(GetSnapshotKey(metadata.PersistenceId), metadata.SequenceNr);
+            transaction.HashDeleteAsync(this.GetSnapshotMetadataKey(metadata.PersistenceId), metadata.SequenceNr);
+            transaction.HashDeleteAsync(this.GetSnapshotKey(metadata.PersistenceId), metadata.SequenceNr);
+            transaction.KeyExpireAsync(this.GetSnapshotKey(metadata.PersistenceId), this.ttl);
+            transaction.KeyExpireAsync(this.GetSnapshotMetadataKey(metadata.PersistenceId), this.ttl);
 #pragma warning restore 4014
             await transaction.ExecuteAsync();
         }
@@ -68,13 +107,15 @@
                 storedSnapshots.Where(
                     m => m.SequenceNr <= criteria.MaxSequenceNr && m.Timestamp <= criteria.MaxTimeStamp);
 
-            var db = this.redisConnection.GetDatabase();
+            var db = this.redisConnection.GetDatabase(this.database);
             var transaction = db.CreateTransaction();
             foreach (var snapshotMetadata in metadata)
             {
 #pragma warning disable 4014
-                transaction.HashDeleteAsync(GetSnapshotDateKey(persistenceId), snapshotMetadata.SequenceNr);
-                transaction.HashDeleteAsync(GetSnapshotKey(persistenceId), snapshotMetadata.SequenceNr);
+                transaction.HashDeleteAsync(this.GetSnapshotMetadataKey(persistenceId), snapshotMetadata.SequenceNr);
+                transaction.HashDeleteAsync(this.GetSnapshotKey(persistenceId), snapshotMetadata.SequenceNr);
+                transaction.KeyExpireAsync(this.GetSnapshotKey(persistenceId), this.ttl);
+                transaction.KeyExpireAsync(this.GetSnapshotMetadataKey(persistenceId), this.ttl);
 #pragma warning restore 4014
             }
 
@@ -99,14 +140,21 @@
                 return null;
             }
 
-            var db = this.redisConnection.GetDatabase();
+            var db = this.redisConnection.GetDatabase(this.database);
             var serializer = new Wire.Serializer();
-            var snapshotData = await db.HashGetAsync(GetSnapshotKey(persistenceId), metadata.SequenceNr);
+            var snapshotData = await db.HashGetAsync(this.GetSnapshotKey(persistenceId), metadata.SequenceNr);
 
             if (!snapshotData.HasValue)
             {
                 return null;
             }
+
+            var transaction = db.CreateTransaction();
+#pragma warning disable 4014
+            transaction.KeyExpireAsync(this.GetSnapshotKey(persistenceId), this.ttl);
+            transaction.KeyExpireAsync(this.GetSnapshotMetadataKey(persistenceId), this.ttl);
+#pragma warning restore 4014
+            await transaction.ExecuteAsync();
 
             using (var stream = new MemoryStream())
             {
@@ -125,9 +173,9 @@
         /// <returns>The list of stored snapshots metadata </returns>
         private async Task<List<SnapshotMetadata>> GetStoredSnapshotsMetadata(string persistenceId)
         {
-            var db = this.redisConnection.GetDatabase();
+            var db = this.redisConnection.GetDatabase(this.database);
             var serializer = new Wire.Serializer();
-            var storedSnapshots = (await db.HashGetAllAsync(GetSnapshotDateKey(persistenceId))).Select(
+            var storedSnapshots = (await db.HashGetAllAsync(this.GetSnapshotMetadataKey(persistenceId))).Select(
                 data =>
                     {
                         using (var stream = new MemoryStream())
@@ -152,6 +200,12 @@
         {
             base.PreStart();
             this.redisConnection = ConnectionMultiplexer.Connect(Context.System.Settings.Config.GetString("akka.persistence.snapshot-store.redis.connection-string"));
+
+            var configuredTtl = Context.System.Settings.Config.GetTimeSpan("akka.persistence.snapshot-store.redis.ttl", allowInfinite: false);
+            this.ttl = configuredTtl == default(TimeSpan) ? null : (TimeSpan?)configuredTtl;
+
+            this.database = Context.System.Settings.Config.GetInt("akka.persistence.snapshot-store.redis.database", -1);
+            this.keyPrefix = Context.System.Settings.Config.GetString("akka.persistence.snapshot-store.redis.key-prefix", "akka:presistance:snapshots");
         }
 
         /// <summary>
@@ -160,22 +214,24 @@
         /// </summary>
         protected override async Task SaveAsync(SnapshotMetadata metadata, object snapshot)
         {
-            var db = this.redisConnection.GetDatabase();
+            var db = this.redisConnection.GetDatabase(this.database);
             var transaction = db.CreateTransaction();
             var serializer = new Wire.Serializer();
 #pragma warning disable 4014
             using (var stream = new MemoryStream())
             {
                 serializer.Serialize(snapshot, stream);
-                transaction.HashSetAsync(GetSnapshotKey(metadata.PersistenceId), metadata.SequenceNr, stream.ToArray());
+                transaction.HashSetAsync(this.GetSnapshotKey(metadata.PersistenceId), metadata.SequenceNr, stream.ToArray());
             }
 
             using (var stream = new MemoryStream())
             {
                 serializer.Serialize(metadata, stream);
-                transaction.HashSetAsync(GetSnapshotDateKey(metadata.PersistenceId), metadata.SequenceNr, stream.ToArray());
+                transaction.HashSetAsync(this.GetSnapshotMetadataKey(metadata.PersistenceId), metadata.SequenceNr, stream.ToArray());
             }
 
+            transaction.KeyExpireAsync(this.GetSnapshotKey(metadata.PersistenceId), this.ttl);
+            transaction.KeyExpireAsync(this.GetSnapshotMetadataKey(metadata.PersistenceId), this.ttl);
 #pragma warning restore 4014
 
             var result = await transaction.ExecuteAsync();

@@ -25,6 +25,21 @@
         private IConnectionMultiplexer redisConnection;
 
         /// <summary>
+        /// Redis entries time to live interval. All records will be erased from redis, after specified timeout
+        /// </summary>
+        private TimeSpan? ttl;
+
+        /// <summary>
+        /// The redis database number (-1 for default)
+        /// </summary>
+        private int database;
+
+        /// <summary>
+        /// Storage key prefix
+        /// </summary>
+        private string keyPrefix;
+
+        /// <summary>
         /// Asynchronously reads the highest stored sequence number for provided <paramref name="persistenceId" />.
         /// The persistent actor will use the highest sequence number after recovery as the starting point when
         /// persisting new events.
@@ -43,9 +58,9 @@
         /// <returns></returns>
         public override async Task<long> ReadHighestSequenceNrAsync(string persistenceId, long fromSequenceNr)
         {
-            var db = this.redisConnection.GetDatabase();
-            var listCount = await db.ListLengthAsync(GetJournalKey(persistenceId));
-            var deletedCount = (long)await db.StringGetAsync(GetJournalSkippedKey(persistenceId));
+            var db = this.redisConnection.GetDatabase(this.database);
+            var listCount = await db.ListLengthAsync(this.GetJournalKey(persistenceId));
+            var deletedCount = (long)await db.StringGetAsync(this.GetJournalSkippedKey(persistenceId));
 
             return listCount + deletedCount;
         }
@@ -86,9 +101,9 @@
             fromSequenceNr--;
             toSequenceNr--;
 
-            var db = this.redisConnection.GetDatabase();
-            var listCount = await db.ListLengthAsync(GetJournalKey(persistenceId));
-            var deletedCount = (long)await db.StringGetAsync(GetJournalSkippedKey(persistenceId));
+            var db = this.redisConnection.GetDatabase(this.database);
+            var listCount = await db.ListLengthAsync(this.GetJournalKey(persistenceId));
+            var deletedCount = (long)await db.StringGetAsync(this.GetJournalSkippedKey(persistenceId));
 
             fromSequenceNr = fromSequenceNr > deletedCount ? fromSequenceNr - deletedCount : 0L;
             toSequenceNr = toSequenceNr > deletedCount ? toSequenceNr - deletedCount : 0L;
@@ -103,7 +118,7 @@
                 toSequenceNr = fromSequenceNr + max - 1;
             }
 
-            var events = await db.ListRangeAsync(GetJournalKey(persistenceId), fromSequenceNr, toSequenceNr);
+            var events = await db.ListRangeAsync(this.GetJournalKey(persistenceId), fromSequenceNr, toSequenceNr);
             var serializer = new Wire.Serializer();
             foreach (byte[] value in events)
             {
@@ -115,6 +130,13 @@
                     recoveryCallback(record);
                 }
             }
+
+            var transaction = db.CreateTransaction();
+#pragma warning disable 4014
+            transaction.KeyExpireAsync(this.GetJournalKey(persistenceId), this.ttl);
+            transaction.KeyExpireAsync(this.GetJournalSkippedKey(persistenceId), this.ttl);
+#pragma warning restore 4014
+            await transaction.ExecuteAsync();
         }
 
         /// <summary>
@@ -126,9 +148,9 @@
             // Ghm... we count sequence from 0, but user counts it from 1... adjusting
             toSequenceNr--;
 
-            var db = this.redisConnection.GetDatabase();
-            var listCount = await db.ListLengthAsync(GetJournalKey(persistenceId));
-            var deletedCount = (long)await db.StringGetAsync(GetJournalSkippedKey(persistenceId));
+            var db = this.redisConnection.GetDatabase(this.database);
+            var listCount = await db.ListLengthAsync(this.GetJournalKey(persistenceId));
+            var deletedCount = (long)await db.StringGetAsync(this.GetJournalSkippedKey(persistenceId));
 
             if (toSequenceNr <= deletedCount)
             {
@@ -140,12 +162,14 @@
             for (long i = 0; i <= toSequenceNr && i < listCount; i++)
             {
 #pragma warning disable 4014
-                transaction.ListLeftPopAsync(GetJournalKey(persistenceId));
+                transaction.ListLeftPopAsync(this.GetJournalKey(persistenceId));
 #pragma warning restore 4014
             }
 
 #pragma warning disable 4014
-            transaction.StringSetAsync(GetJournalSkippedKey(persistenceId), deletedCount + toSequenceNr + 1);
+            transaction.StringSetAsync(this.GetJournalSkippedKey(persistenceId), deletedCount + toSequenceNr + 1);
+            transaction.KeyExpireAsync(this.GetJournalKey(persistenceId), this.ttl);
+            transaction.KeyExpireAsync(this.GetJournalSkippedKey(persistenceId), this.ttl);
 #pragma warning restore 4014
 
             await transaction.ExecuteAsync();
@@ -162,6 +186,11 @@
         {
             base.PreStart();
             this.redisConnection = ConnectionMultiplexer.Connect(Context.System.Settings.Config.GetString("akka.persistence.journal.redis.connection-string"));
+            var configuredTtl = Context.System.Settings.Config.GetTimeSpan("akka.persistence.journal.redis.ttl", allowInfinite: false);
+            this.ttl = configuredTtl == default(TimeSpan) ? null : (TimeSpan?)configuredTtl;
+
+            this.database = Context.System.Settings.Config.GetInt("akka.persistence.journal.redis.database", -1);
+            this.keyPrefix = Context.System.Settings.Config.GetString("akka.persistence.journal.redis.key-prefix", "akka:presistance:journal");
         }
 
         /// <summary>
@@ -232,7 +261,7 @@
                     {
                         var serializer = new Wire.Serializer();
 
-                        var db = this.redisConnection.GetDatabase();
+                        var db = this.redisConnection.GetDatabase(this.database);
 
                         var persistentMessages =
                             g.SelectMany(aw => (IImmutableList<IPersistentRepresentation>)aw.Payload).ToList();
@@ -243,10 +272,15 @@
                             {
                                 serializer.Serialize(write, stream);
 #pragma warning disable 4014
-                                transaction.ListRightPushAsync(GetJournalKey(write.PersistenceId), stream.ToArray());
+                                transaction.ListRightPushAsync(this.GetJournalKey(write.PersistenceId), stream.ToArray());
 #pragma warning restore 4014
                             }
                         }
+
+#pragma warning disable 4014
+                        transaction.KeyExpireAsync(this.GetJournalKey(g.Key), this.ttl);
+                        transaction.KeyExpireAsync(this.GetJournalSkippedKey(g.Key), this.ttl);
+#pragma warning restore 4014
 
                         if (!await transaction.ExecuteAsync())
                         {
@@ -260,8 +294,19 @@
                         m =>
                             {
                                 var task = groupedTasks[m.PersistenceId];
-                                return task.IsFaulted ? this.TryUnwrapException(task.Exception) : null;
+                                return task.IsFaulted ? TryUnwrapException(task.Exception) : null;
                             }).ToImmutableList());
+        }
+
+        /// <summary>
+        /// Creates key for redis list
+        /// </summary>
+        /// <param name="prefix">The storage key prefix</param>
+        /// <param name="persistenceId">Akka actor persistence identification</param>
+        /// <returns>The redis key</returns>
+        public static RedisKey GetJournalKey([NotNull] string prefix, [NotNull] string persistenceId)
+        {
+            return $"{prefix}:lists:{persistenceId}";
         }
 
         /// <summary>
@@ -269,9 +314,20 @@
         /// </summary>
         /// <param name="persistenceId">Akka actor persistence identification</param>
         /// <returns>The redis key</returns>
-        public static RedisKey GetJournalKey(string persistenceId)
+        private RedisKey GetJournalKey(string persistenceId)
         {
-            return $"akka:presistance:journal:lists:{persistenceId}";
+            return GetJournalKey(this.keyPrefix, persistenceId);
+        }
+
+        /// <summary>
+        /// Creates key for redis skipped key (in case event was deleted, this should help to keep correct sequence numeration)
+        /// </summary>
+        /// <param name="prefix">The storage key prefix</param>
+        /// <param name="persistenceId">Akka actor persistence identification</param>
+        /// <returns>The redis key</returns>
+        public static RedisKey GetJournalSkippedKey(string prefix, string persistenceId)
+        {
+            return $"{prefix}:skippedKeys:{persistenceId}";
         }
 
         /// <summary>
@@ -279,12 +335,17 @@
         /// </summary>
         /// <param name="persistenceId">Akka actor persistence identification</param>
         /// <returns>The redis key</returns>
-        public static RedisKey GetJournalSkippedKey(string persistenceId)
+        private RedisKey GetJournalSkippedKey(string persistenceId)
         {
-            return $"akka:presistance:journal:skippedKeys:{persistenceId}";
+            return GetJournalSkippedKey(this.keyPrefix, persistenceId);
         }
 
-        private Exception TryUnwrapException(Exception e)
+        /// <summary>
+        /// Extracts real exception data from <see cref="AggregateException"/>
+        /// </summary>
+        /// <param name="e">The exception</param>
+        /// <returns>Extracted exception</returns>
+        private static Exception TryUnwrapException(Exception e)
         {
             var aggregateException = e as AggregateException;
             if (aggregateException != null)

@@ -1,5 +1,6 @@
 ﻿namespace Akka.Persistence.Redis.Tests
 {
+    using System.Configuration;
     using System.Linq;
 
     using Akka.Configuration;
@@ -20,7 +21,7 @@
         /// </summary>
         /// <param name="output">Default xunit output</param>
         public RedisSnapshotStoreSpec(ITestOutputHelper output)
-            : base(CreateSpecConfig("192.168.99.100:6379"), "RedisJournalSpec", output)
+            : base(CreateSpecConfig(), "RedisJournalSpec", output)
         {
             this.Initialize();
         }
@@ -32,14 +33,17 @@
         protected override void Dispose(bool disposing)
         {
             var redisConnection = ConnectionMultiplexer.Connect(this.Sys.Settings.Config.GetString("akka.persistence.snapshot-store.redis.connection-string"));
+            var keyPrefix = this.Sys.Settings.Config.GetString("akka.persistence.snapshot-store.redis.key-prefix");
+            var database = this.Sys.Settings.Config.GetInt("akka.persistence.snapshot-store.redis.database");
+
             var server = redisConnection.GetServer(redisConnection.GetEndPoints().First());
-            var db = redisConnection.GetDatabase();
-            foreach (var key in server.Keys(pattern: (string)RedisSnapshotStore.GetSnapshotKey("*")))
+            var db = redisConnection.GetDatabase(database);
+            foreach (var key in server.Keys(database: database, pattern: (string)RedisSnapshotStore.GetSnapshotKey(keyPrefix, "*")))
             {
                 db.KeyDelete(key);
             }
 
-            foreach (var key in server.Keys(pattern: (string)RedisSnapshotStore.GetSnapshotDateKey("*")))
+            foreach (var key in server.Keys(database: database, pattern: (string)RedisSnapshotStore.GetSnapshotMetadataKey(keyPrefix, "*")))
             {
                 db.KeyDelete(key);
             }
@@ -50,10 +54,12 @@
         /// <summary>
         /// Creates the default test system config
         /// </summary>
-        /// <param name="connectionString">Redis connection string</param>
         /// <returns>The akka system config</returns>
-        private static Config CreateSpecConfig(string connectionString)
+        private static Config CreateSpecConfig()
         {
+            var connectionString = ConfigurationManager.ConnectionStrings["redis"].ConnectionString;
+            var database = ConfigurationManager.AppSettings["redisDatabase"];
+
             return ConfigurationFactory.ParseString(@"
                 akka.persistence {
                     publish-plugin-commands = on
@@ -63,6 +69,9 @@
                             class = ""Akka.Persistence.Redis.Snapshot.RedisSnapshotStore, Akka.Persistence.Redis""
                             connection-string = """ + connectionString + @"""
                             plugin-dispatcher = ""akka.actor.default-dispatcher""
+                            ttl = 1h
+                            database = """ + database + @"""
+                            key-prefix = ""akka:presistance:snapshots""
                         }
                     }
                 }");
