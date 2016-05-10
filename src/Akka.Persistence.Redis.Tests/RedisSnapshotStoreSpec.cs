@@ -1,14 +1,12 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
-
-namespace Akka.Persistence.Redis.Tests
+﻿namespace Akka.Persistence.Redis.Tests
 {
+    using System.Linq;
+
     using Akka.Configuration;
+    using Akka.Persistence.Redis.Snapshot;
     using Akka.Persistence.TestKit.Snapshot;
-    using Akka.Util.Internal;
+
+    using StackExchange.Redis;
 
     using Xunit.Abstractions;
 
@@ -22,9 +20,31 @@ namespace Akka.Persistence.Redis.Tests
         /// </summary>
         /// <param name="output">Default xunit output</param>
         public RedisSnapshotStoreSpec(ITestOutputHelper output)
-            : base(CreateSpecConfig("redis"), "RedisJournalSpec", output)
+            : base(CreateSpecConfig("192.168.99.100:6379"), "RedisJournalSpec", output)
         {
             this.Initialize();
+        }
+
+        /// <summary>
+        /// Clears all temporary test data
+        /// </summary>
+        /// <param name="disposing">Whether method is called by <see cref="Dispose"/></param>
+        protected override void Dispose(bool disposing)
+        {
+            var redisConnection = ConnectionMultiplexer.Connect(this.Sys.Settings.Config.GetString("akka.persistence.snapshot-store.redis.connection-string"));
+            var server = redisConnection.GetServer(redisConnection.GetEndPoints().First());
+            var db = redisConnection.GetDatabase();
+            foreach (var key in server.Keys(pattern: (string)RedisSnapshotStore.GetSnapshotKey("*")))
+            {
+                db.KeyDelete(key);
+            }
+
+            foreach (var key in server.Keys(pattern: (string)RedisSnapshotStore.GetSnapshotDateKey("*")))
+            {
+                db.KeyDelete(key);
+            }
+
+            base.Dispose(disposing);
         }
 
         /// <summary>

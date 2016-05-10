@@ -1,13 +1,13 @@
 ﻿namespace Akka.Persistence.Redis.Tests
 {
-    using System.Linq;
-
+    using Akka.Actor;
     using Akka.Configuration;
     using Akka.Persistence.Redis.Journal;
     using Akka.Persistence.TestKit.Journal;
 
     using StackExchange.Redis;
 
+    using Xunit;
     using Xunit.Abstractions;
 
     /// <summary>
@@ -25,24 +25,10 @@
             this.Initialize();
         }
 
-        /// <summary>
-        /// Clears all temporary test data
-        /// </summary>
-        /// <param name="disposing">Whether method is called by <see cref="Dispose"/></param>
         protected override void Dispose(bool disposing)
         {
             var redisConnection = ConnectionMultiplexer.Connect(this.Sys.Settings.Config.GetString("akka.persistence.journal.redis.connection-string"));
-            var server = redisConnection.GetServer(redisConnection.GetEndPoints().First());
-            var db = redisConnection.GetDatabase();
-            foreach (var key in server.Keys(pattern: (string)RedisJournal.GetJournalKey("*")))
-            {
-                db.KeyDelete(key);
-            }
-
-            foreach (var key in server.Keys(pattern: (string)RedisJournal.GetJournalSkippedKey("*")))
-            {
-                db.KeyDelete(key);
-            }
+            redisConnection.GetServer("192.168.99.100", 6379).FlushDatabase();
 
             base.Dispose(disposing);
         }

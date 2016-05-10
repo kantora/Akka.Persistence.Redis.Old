@@ -1,21 +1,29 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
-
-namespace Akka.Persistence.Redis.Journal
+﻿namespace Akka.Persistence.Redis.Journal
 {
+    using System;
+    using System.Collections.Generic;
     using System.Collections.Immutable;
-
+    using System.IO;
+    using System.Linq;
+    using System.Threading.Tasks;
     using Akka.Actor;
     using Akka.Persistence.Journal;
+
+    using JetBrains.Annotations;
+
+    using StackExchange.Redis;
 
     /// <summary>
     /// The Redis write journal
     /// </summary>
+    [UsedImplicitly]
     public class RedisJournal : AsyncWriteJournal
     {
+        /// <summary>
+        /// Actual connection to redis database
+        /// </summary>
+        private IConnectionMultiplexer redisConnection;
+
         /// <summary>
         /// Asynchronously reads the highest stored sequence number for provided <paramref name="persistenceId" />.
         /// The persistent actor will use the highest sequence number after recovery as the starting point when
@@ -33,9 +41,13 @@ namespace Akka.Persistence.Redis.Journal
         /// When a persistent actor is recovering this <paramref name="fromSequenceNr" /> will the the sequence
         /// number of the used snapshot, or `0L` if no snapshot is used.</param>
         /// <returns></returns>
-        public override Task<long> ReadHighestSequenceNrAsync(string persistenceId, long fromSequenceNr)
+        public override async Task<long> ReadHighestSequenceNrAsync(string persistenceId, long fromSequenceNr)
         {
-            throw new NotImplementedException();
+            var db = this.redisConnection.GetDatabase();
+            var listCount = await db.ListLengthAsync(GetJournalKey(persistenceId));
+            var deletedCount = (long)await db.StringGetAsync(GetJournalSkippedKey(persistenceId));
+
+            return listCount + deletedCount;
         }
 
         /// <summary>
@@ -55,13 +67,14 @@ namespace Akka.Persistence.Redis.Journal
         /// is completed with success or failure within reasonable time. It is not allowed to
         /// ignore completing the <see cref="T:System.Threading.Tasks.Task" />.
         /// </summary>
+        /// <param name="context">The current actor context</param>
         /// <param name="persistenceId">Persistent actor identifier</param>
         /// <param name="fromSequenceNr">Inclusive sequence number where replay should start</param>
         /// <param name="toSequenceNr">Inclusive sequence number where replay should end</param>
         /// <param name="max">Maximum number of messages to be replayed</param>
         /// <param name="recoveryCallback">Called to replay a message, may be called from any thread.</param>
         /// <returns></returns>
-        public override Task ReplayMessagesAsync(
+        public override async Task ReplayMessagesAsync(
                     IActorContext context,
             string persistenceId,
             long fromSequenceNr,
@@ -69,16 +82,86 @@ namespace Akka.Persistence.Redis.Journal
             long max,
             Action<IPersistentRepresentation> recoveryCallback)
         {
-            throw new NotImplementedException();
+            // Ghm... we count sequence from 0, but user counts it from 1... adjusting
+            fromSequenceNr--;
+            toSequenceNr--;
+
+            var db = this.redisConnection.GetDatabase();
+            var listCount = await db.ListLengthAsync(GetJournalKey(persistenceId));
+            var deletedCount = (long)await db.StringGetAsync(GetJournalSkippedKey(persistenceId));
+
+            fromSequenceNr = fromSequenceNr > deletedCount ? fromSequenceNr - deletedCount : 0L;
+            toSequenceNr = toSequenceNr > deletedCount ? toSequenceNr - deletedCount : 0L;
+
+            if (toSequenceNr >= listCount)
+            {
+                toSequenceNr = listCount - 1;
+            }
+
+            if (toSequenceNr - fromSequenceNr + 1 > max)
+            {
+                toSequenceNr = fromSequenceNr + max - 1;
+            }
+
+            var events = await db.ListRangeAsync(GetJournalKey(persistenceId), fromSequenceNr, toSequenceNr);
+            var serializer = new Wire.Serializer();
+            foreach (byte[] value in events)
+            {
+                using (var stream = new MemoryStream())
+                {
+                    stream.Write(value, 0, value.Length);
+                    stream.Position = 0;
+                    var record = serializer.Deserialize<IPersistentRepresentation>(stream);
+                    recoveryCallback(record);
+                }
+            }
         }
 
         /// <summary>
         /// Asynchronously deletes all persistent messages up to inclusive <paramref name="toSequenceNr" />
         /// bound.
         /// </summary>
-        protected override Task DeleteMessagesToAsync(string persistenceId, long toSequenceNr)
+        protected override async Task DeleteMessagesToAsync(string persistenceId, long toSequenceNr)
         {
-            throw new NotImplementedException();
+            // Ghm... we count sequence from 0, but user counts it from 1... adjusting
+            toSequenceNr--;
+
+            var db = this.redisConnection.GetDatabase();
+            var listCount = await db.ListLengthAsync(GetJournalKey(persistenceId));
+            var deletedCount = (long)await db.StringGetAsync(GetJournalSkippedKey(persistenceId));
+
+            if (toSequenceNr <= deletedCount)
+            {
+                return;
+            }
+
+            toSequenceNr -= deletedCount;
+            var transaction = db.CreateTransaction();
+            for (long i = 0; i <= toSequenceNr && i < listCount; i++)
+            {
+#pragma warning disable 4014
+                transaction.ListLeftPopAsync(GetJournalKey(persistenceId));
+#pragma warning restore 4014
+            }
+
+#pragma warning disable 4014
+            transaction.StringSetAsync(GetJournalSkippedKey(persistenceId), deletedCount + toSequenceNr + 1);
+#pragma warning restore 4014
+
+            await transaction.ExecuteAsync();
+        }
+
+        /// <summary>
+        ///     User overridable callback.
+        ///     <p />
+        ///     Is called when an Actor is started.
+        ///     Actors are automatically started asynchronously when created.
+        ///     Empty default implementation.
+        /// </summary>
+        protected override void PreStart()
+        {
+            base.PreStart();
+            this.redisConnection = ConnectionMultiplexer.Connect(Context.System.Settings.Config.GetString("akka.persistence.journal.redis.connection-string"));
         }
 
         /// <summary>
@@ -122,7 +205,7 @@ namespace Akka.Persistence.Redis.Journal
         /// It is possible but not mandatory to reduce number of allocations by returning
         /// null for the happy path, i.e. when no messages are rejected.
         /// Calls to this method are serialized by the enclosing journal actor. If you spawn
-        /// work in asyncronous tasks it is alright that they complete the futures in any order,
+        /// work in asynchronous tasks it is alright that they complete the futures in any order,
         /// but the actual writes for a specific persistenceId should be serialized to avoid
         /// issues such as events of a later write are visible to consumers (query side, or replay)
         /// before the events of an earlier write are visible.
@@ -140,9 +223,77 @@ namespace Akka.Persistence.Redis.Journal
         /// may reuse sequence numbers.
         /// This call is protected with a circuit-breaker.
         /// </summary>
-        protected override Task<IImmutableList<Exception>> WriteMessagesAsync(IEnumerable<AtomicWrite> messages)
+        protected override async Task<IImmutableList<Exception>> WriteMessagesAsync(IEnumerable<AtomicWrite> messages)
         {
-            throw new NotImplementedException();
+            // as I've got from test, it is possible to get several AtomicWrite for one PersistenceId. In this case we should always maintain correct write order.
+            var messagesList = messages.ToList();
+            var groupedTasks = messagesList.GroupBy(m => m.PersistenceId).ToDictionary(g => g.Key,
+                async g =>
+                    {
+                        var serializer = new Wire.Serializer();
+
+                        var db = this.redisConnection.GetDatabase();
+
+                        var persistentMessages =
+                            g.SelectMany(aw => (IImmutableList<IPersistentRepresentation>)aw.Payload).ToList();
+                        var transaction = db.CreateTransaction();
+                        foreach (var write in persistentMessages)
+                        {
+                            using (var stream = new MemoryStream())
+                            {
+                                serializer.Serialize(write, stream);
+#pragma warning disable 4014
+                                transaction.ListRightPushAsync(GetJournalKey(write.PersistenceId), stream.ToArray());
+#pragma warning restore 4014
+                            }
+                        }
+
+                        if (!await transaction.ExecuteAsync())
+                        {
+                            throw new Exception("Error while saving to redis");
+                        }
+                    });
+
+            return await Task<IImmutableList<Exception>>.Factory.ContinueWhenAll(
+                    groupedTasks.Values.ToArray(),
+                    tasks => messagesList.Select(
+                        m =>
+                            {
+                                var task = groupedTasks[m.PersistenceId];
+                                return task.IsFaulted ? this.TryUnwrapException(task.Exception) : null;
+                            }).ToImmutableList());
+        }
+
+        /// <summary>
+        /// Creates key for redis list
+        /// </summary>
+        /// <param name="persistenceId">Akka actor persistence identification</param>
+        /// <returns>The redis key</returns>
+        public static RedisKey GetJournalKey(string persistenceId)
+        {
+            return $"akka:presistance:journal:lists:{persistenceId}";
+        }
+
+        /// <summary>
+        /// Creates key for redis skipped key (in case event was deleted, this should help to keep correct sequence numeration)
+        /// </summary>
+        /// <param name="persistenceId">Akka actor persistence identification</param>
+        /// <returns>The redis key</returns>
+        public static RedisKey GetJournalSkippedKey(string persistenceId)
+        {
+            return $"akka:presistance:journal:skippedKeys:{persistenceId}";
+        }
+
+        private Exception TryUnwrapException(Exception e)
+        {
+            var aggregateException = e as AggregateException;
+            if (aggregateException != null)
+            {
+                aggregateException = aggregateException.Flatten();
+                if (aggregateException.InnerExceptions.Count == 1)
+                    return aggregateException.InnerExceptions[0];
+            }
+            return e;
         }
     }
 }
