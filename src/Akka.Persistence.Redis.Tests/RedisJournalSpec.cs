@@ -38,12 +38,12 @@
 
             var server = redisConnection.GetServer(redisConnection.GetEndPoints().First());
             var db = redisConnection.GetDatabase(database);
-            foreach (var key in server.Keys(database: database, pattern: (string)RedisJournal.GetJournalKey(keyPrefix, "*")))
+            foreach (var key in server.Keys(database: database, pattern: (string)RedisJournal.GetJournalDataKey(keyPrefix, "*")))
             {
                 db.KeyDelete(key);
             }
 
-            foreach (var key in server.Keys(database: database, pattern: (string)RedisJournal.GetJournalSkippedKey(keyPrefix, "*")))
+            foreach (var key in server.Keys(database: database, pattern: (string)RedisJournal.GetJournalHighestSequenceNumberKey(keyPrefix, "*")))
             {
                 db.KeyDelete(key);
             }

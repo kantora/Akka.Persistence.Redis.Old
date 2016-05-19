@@ -3,7 +3,6 @@
     using System;
     using System.Collections.Generic;
     using System.Collections.Immutable;
-    using System.IO;
     using System.Linq;
     using System.Threading.Tasks;
     using Akka.Actor;
@@ -40,6 +39,11 @@
         private string keyPrefix;
 
         /// <summary>
+        /// The actor system
+        /// </summary>
+        private ActorSystem system;
+
+        /// <summary>
         /// Asynchronously reads the highest stored sequence number for provided <paramref name="persistenceId" />.
         /// The persistent actor will use the highest sequence number after recovery as the starting point when
         /// persisting new events.
@@ -59,10 +63,7 @@
         public override async Task<long> ReadHighestSequenceNrAsync(string persistenceId, long fromSequenceNr)
         {
             var db = this.redisConnection.GetDatabase(this.database);
-            var listCount = await db.ListLengthAsync(this.GetJournalKey(persistenceId));
-            var deletedCount = (long)await db.StringGetAsync(this.GetJournalSkippedKey(persistenceId));
-
-            return listCount + deletedCount;
+            return (long)await db.StringGetAsync(this.GetJournalHighestSequenceNumberKey(persistenceId));
         }
 
         /// <summary>
@@ -97,44 +98,32 @@
             long max,
             Action<IPersistentRepresentation> recoveryCallback)
         {
-            // Ghm... we count sequence from 0, but user counts it from 1... adjusting
-            fromSequenceNr--;
-            toSequenceNr--;
-
             var db = this.redisConnection.GetDatabase(this.database);
-            var listCount = await db.ListLengthAsync(this.GetJournalKey(persistenceId));
-            var deletedCount = (long)await db.StringGetAsync(this.GetJournalSkippedKey(persistenceId));
 
-            fromSequenceNr = fromSequenceNr > deletedCount ? fromSequenceNr - deletedCount : 0L;
-            toSequenceNr = toSequenceNr > deletedCount ? toSequenceNr - deletedCount : 0L;
+            var storedSequenceNumbers =
+                (await db.HashKeysAsync(this.GetJournalDataKey(persistenceId))).Select(v => (long)v)
+                    .Where(n => n >= fromSequenceNr && n <= toSequenceNr)
+                    .OrderBy(n => n);
 
-            if (toSequenceNr >= listCount)
+
+            var serializer = new Akka.Serialization.WireSerializer((ExtendedActorSystem)this.system);
+            var index = 0L;
+
+            foreach (var n in storedSequenceNumbers)
             {
-                toSequenceNr = listCount - 1;
-            }
-
-            if (toSequenceNr - fromSequenceNr + 1 > max)
-            {
-                toSequenceNr = fromSequenceNr + max - 1;
-            }
-
-            var events = await db.ListRangeAsync(this.GetJournalKey(persistenceId), fromSequenceNr, toSequenceNr);
-            var serializer = new Wire.Serializer();
-            foreach (byte[] value in events)
-            {
-                using (var stream = new MemoryStream())
+                if (index++ >= max)
                 {
-                    stream.Write(value, 0, value.Length);
-                    stream.Position = 0;
-                    var record = serializer.Deserialize<IPersistentRepresentation>(stream);
-                    recoveryCallback(record);
+                    break;
                 }
+
+                var record = serializer.FromBinary(await db.HashGetAsync(this.GetJournalDataKey(persistenceId), n), typeof(Persistent));
+                recoveryCallback((IPersistentRepresentation)record);
             }
 
             var transaction = db.CreateTransaction();
 #pragma warning disable 4014
-            transaction.KeyExpireAsync(this.GetJournalKey(persistenceId), this.ttl);
-            transaction.KeyExpireAsync(this.GetJournalSkippedKey(persistenceId), this.ttl);
+            transaction.KeyExpireAsync(this.GetJournalDataKey(persistenceId), this.ttl);
+            transaction.KeyExpireAsync(this.GetJournalHighestSequenceNumberKey(persistenceId), this.ttl);
 #pragma warning restore 4014
             await transaction.ExecuteAsync();
         }
@@ -145,31 +134,23 @@
         /// </summary>
         protected override async Task DeleteMessagesToAsync(string persistenceId, long toSequenceNr)
         {
-            // Ghm... we count sequence from 0, but user counts it from 1... adjusting
-            toSequenceNr--;
-
             var db = this.redisConnection.GetDatabase(this.database);
-            var listCount = await db.ListLengthAsync(this.GetJournalKey(persistenceId));
-            var deletedCount = (long)await db.StringGetAsync(this.GetJournalSkippedKey(persistenceId));
+            var storedSequenceNumbers =
+                // ReSharper disable once SuspiciousTypeConversion.Global
+                (await db.HashKeysAsync(this.GetJournalDataKey(persistenceId))).Select(v => (long)v)
+                    .Where(n => n <= toSequenceNr);
 
-            if (toSequenceNr <= deletedCount)
-            {
-                return;
-            }
-
-            toSequenceNr -= deletedCount;
             var transaction = db.CreateTransaction();
-            for (long i = 0; i <= toSequenceNr && i < listCount; i++)
+            foreach (var n in storedSequenceNumbers)
             {
 #pragma warning disable 4014
-                transaction.ListLeftPopAsync(this.GetJournalKey(persistenceId));
+                transaction.HashDeleteAsync(this.GetJournalDataKey(persistenceId), n);
 #pragma warning restore 4014
             }
 
 #pragma warning disable 4014
-            transaction.StringSetAsync(this.GetJournalSkippedKey(persistenceId), deletedCount + toSequenceNr + 1);
-            transaction.KeyExpireAsync(this.GetJournalKey(persistenceId), this.ttl);
-            transaction.KeyExpireAsync(this.GetJournalSkippedKey(persistenceId), this.ttl);
+            transaction.KeyExpireAsync(this.GetJournalDataKey(persistenceId), this.ttl);
+            transaction.KeyExpireAsync(this.GetJournalHighestSequenceNumberKey(persistenceId), this.ttl);
 #pragma warning restore 4014
 
             await transaction.ExecuteAsync();
@@ -184,6 +165,7 @@
         /// </summary>
         protected override void PreStart()
         {
+            this.system = Context.System;
             base.PreStart();
             this.redisConnection = ConnectionMultiplexer.Connect(Context.System.Settings.Config.GetString("akka.persistence.journal.redis.connection-string"));
             var configuredTtl = Context.System.Settings.Config.GetTimeSpan("akka.persistence.journal.redis.ttl", allowInfinite: false);
@@ -259,27 +241,38 @@
             var groupedTasks = messagesList.GroupBy(m => m.PersistenceId).ToDictionary(g => g.Key,
                 async g =>
                     {
-                        var serializer = new Wire.Serializer();
+                        var serializer = new Akka.Serialization.WireSerializer((ExtendedActorSystem)Context.System);
 
                         var db = this.redisConnection.GetDatabase(this.database);
 
                         var persistentMessages =
                             g.SelectMany(aw => (IImmutableList<IPersistentRepresentation>)aw.Payload).ToList();
+
+                        var currentMaxSeqNumber = (long)db.StringGet(this.GetJournalHighestSequenceNumberKey(g.Key));
+
                         var transaction = db.CreateTransaction();
                         foreach (var write in persistentMessages)
                         {
-                            using (var stream = new MemoryStream())
+                            if (write.SequenceNr > currentMaxSeqNumber)
                             {
-                                serializer.Serialize(write, stream);
-#pragma warning disable 4014
-                                transaction.ListRightPushAsync(this.GetJournalKey(write.PersistenceId), stream.ToArray());
-#pragma warning restore 4014
+                                currentMaxSeqNumber = write.SequenceNr;
                             }
+
+#pragma warning disable 4014
+                            transaction.HashSetAsync(
+                                this.GetJournalDataKey(write.PersistenceId),
+                                write.SequenceNr,
+                                serializer.ToBinary(new Persistent(write.Payload, write.SequenceNr, write.PersistenceId, write.Manifest, write.IsDeleted, write.Sender, write.WriterGuid)));
+#pragma warning restore 4014
+
                         }
 
 #pragma warning disable 4014
-                        transaction.KeyExpireAsync(this.GetJournalKey(g.Key), this.ttl);
-                        transaction.KeyExpireAsync(this.GetJournalSkippedKey(g.Key), this.ttl);
+                        transaction.StringSetAsync(
+                            this.GetJournalHighestSequenceNumberKey(g.Key),
+                            currentMaxSeqNumber,
+                            this.ttl);
+                        transaction.KeyExpireAsync(this.GetJournalDataKey(g.Key), this.ttl);
 #pragma warning restore 4014
 
                         if (!await transaction.ExecuteAsync())
@@ -304,9 +297,9 @@
         /// <param name="prefix">The storage key prefix</param>
         /// <param name="persistenceId">Akka actor persistence identification</param>
         /// <returns>The redis key</returns>
-        public static RedisKey GetJournalKey([NotNull] string prefix, [NotNull] string persistenceId)
+        public static RedisKey GetJournalDataKey([NotNull] string prefix, [NotNull] string persistenceId)
         {
-            return $"{prefix}:lists:{persistenceId}";
+            return $"{prefix}:{persistenceId}:data";
         }
 
         /// <summary>
@@ -314,9 +307,9 @@
         /// </summary>
         /// <param name="persistenceId">Akka actor persistence identification</param>
         /// <returns>The redis key</returns>
-        private RedisKey GetJournalKey(string persistenceId)
+        private RedisKey GetJournalDataKey(string persistenceId)
         {
-            return GetJournalKey(this.keyPrefix, persistenceId);
+            return GetJournalDataKey(this.keyPrefix, persistenceId);
         }
 
         /// <summary>
@@ -325,9 +318,9 @@
         /// <param name="prefix">The storage key prefix</param>
         /// <param name="persistenceId">Akka actor persistence identification</param>
         /// <returns>The redis key</returns>
-        public static RedisKey GetJournalSkippedKey(string prefix, string persistenceId)
+        public static RedisKey GetJournalHighestSequenceNumberKey(string prefix, string persistenceId)
         {
-            return $"{prefix}:skippedKeys:{persistenceId}";
+            return $"{prefix}:{persistenceId}:sequenceNr";
         }
 
         /// <summary>
@@ -335,9 +328,9 @@
         /// </summary>
         /// <param name="persistenceId">Akka actor persistence identification</param>
         /// <returns>The redis key</returns>
-        private RedisKey GetJournalSkippedKey(string persistenceId)
+        private RedisKey GetJournalHighestSequenceNumberKey(string persistenceId)
         {
-            return GetJournalSkippedKey(this.keyPrefix, persistenceId);
+            return GetJournalHighestSequenceNumberKey(this.keyPrefix, persistenceId);
         }
 
         /// <summary>

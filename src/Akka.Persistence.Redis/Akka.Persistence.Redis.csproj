@@ -34,13 +34,14 @@
   </PropertyGroup>
   <ItemGroup>
     <Reference Include="Akka">
-      <HintPath>..\..\packages\Akka.1.0.9.198-beta\lib\net45\Akka.dll</HintPath>
+      <HintPath>..\..\packages\Akka.1.0.9.201-beta\lib\net45\Akka.dll</HintPath>
     </Reference>
     <Reference Include="Akka.Persistence">
-      <HintPath>..\..\packages\Akka.Persistence.1.0.9.198-beta\lib\net45\Akka.Persistence.dll</HintPath>
+      <HintPath>..\..\packages\Akka.Persistence.1.0.9.201-beta\lib\net45\Akka.Persistence.dll</HintPath>
     </Reference>
-    <Reference Include="Akka.Serialization.Wire">
-      <HintPath>..\..\packages\Akka.Serialization.Wire.1.0.9.197-beta\lib\net45\Akka.Serialization.Wire.dll</HintPath>
+    <Reference Include="Akka.Serialization.Wire, Version=1.0.0.0, Culture=neutral, processorArchitecture=MSIL">
+      <SpecificVersion>False</SpecificVersion>
+      <HintPath>..\..\packages\Akka.Serialization.Wire.1.0.9.201-beta\lib\net45\Akka.Serialization.Wire.dll</HintPath>
       <Private>True</Private>
     </Reference>
     <Reference Include="Google.ProtocolBuffers">
