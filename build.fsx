@@ -173,14 +173,16 @@ let updateNugetPackages _ =
     let projectDir = Path.GetDirectoryName projectFile
     let config = projectDir @@ "packages.config"
 
-    NugetUpdate
+    RestorePackage
         (fun p ->
                 { p with
-                    ConfigFile = Some (getConfigFile isPreRelease)
+                    (*ConfigFile = Some (getConfigFile isPreRelease)
                     Prerelease = true
-                    ToolPath = nugetExe
-                    RepositoryPath = "./packages"
                     Ids = getPackages project
+                    *)
+                    ToolPath = nugetExe
+                    OutputPath = "./packages"
+                    
                     }) config
 
 Target "UpdateDependencies" <| fun _ ->
