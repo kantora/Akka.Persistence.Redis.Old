@@ -34,10 +34,10 @@
   </PropertyGroup>
   <ItemGroup>
     <Reference Include="Akka">
-      <HintPath>..\..\packages\Akka.1.0.9.201-beta\lib\net45\Akka.dll</HintPath>
+      <HintPath>..\..\packages\Akka.1.0.9.203-beta\lib\net45\Akka.dll</HintPath>
     </Reference>
     <Reference Include="Akka.Persistence">
-      <HintPath>..\..\packages\Akka.Persistence.1.0.9.201-beta\lib\net45\Akka.Persistence.dll</HintPath>
+      <HintPath>..\..\packages\Akka.Persistence.1.0.9.203-beta\lib\net45\Akka.Persistence.dll</HintPath>
     </Reference>
     <Reference Include="Akka.Serialization.Wire, Version=1.0.0.0, Culture=neutral, processorArchitecture=MSIL">
       <SpecificVersion>False</SpecificVersion>

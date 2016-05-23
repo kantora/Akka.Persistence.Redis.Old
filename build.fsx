@@ -49,8 +49,8 @@ let testOutput = "TestResults"
 
 let nugetDir = binDir @@ "nuget"
 let workingDir = binDir @@ "build"
-let libDir = workingDir @@ @"lib\net45\"
-let nugetExe = FullName @"src\.nuget\NuGet.exe"
+let libDir = workingDir @@ @"lib/net45/"
+let nugetExe = FullName @"src/.nuget/NuGet.exe"
 let slnFile = "./src/Akka.Persistence.Redis.sln"
 
 open Fake.RestorePackageHelper
