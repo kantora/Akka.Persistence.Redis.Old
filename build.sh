@@ -21,5 +21,6 @@ if ! [ -e $SCRIPT_PATH/src/packages/SourceLink.Fake/tools/SourceLink.fsx ] ; the
 fi
 
 export encoding=utf-8
+export MONO_THREADS_PER_CPU=2048
 
 mono $SCRIPT_PATH/src/packages/FAKE/tools/FAKE.exe build.fsx "$@"
