@@ -263,7 +263,7 @@ let createNugetPackages _ =
 
         // Create both normal nuget package and symbols nuget package.
         // Uses the files we copied to workingDir and outputs to nugetdir
-        pack nugetDir NugetSymbolPackage.Nuspec
+        pack nugetDir (if isMono then NugetSymbolPackage.None else NugetSymbolPackage.Nuspec)
 
 let publishNugetPackages _ =
     let rec publishPackage url accessKey trialsLeft packageFile =
