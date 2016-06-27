@@ -118,7 +118,6 @@ Target "CleanTests" <| fun _ ->
 //--------------------------------------------------------------------------------
 // Run tests
 
-open XUnit2Helper
 Target "RunTests" <| fun _ ->
     let xunitTestAssemblies = !! "src/**/bin/Release/*.Tests.dll"
 
@@ -126,8 +125,14 @@ Target "RunTests" <| fun _ ->
 
     let xunitToolPath = findToolInSubPath "xunit.console.exe" "packages/xunit.runner.console*/tools"
     printfn "Using XUnit runner: %s" xunitToolPath
-    xUnit2
-        (fun p -> { p with OutputDir = testOutput; ToolPath = xunitToolPath })
+    Fake.Testing.XUnit2.xUnit2
+        (fun p ->
+        {
+        p with
+                XmlOutputPath = Some (testOutput @@ "xunit.xml");
+                HtmlOutputPath = Some (testOutput @@ "xunit.html");
+                ToolPath = xunitToolPath
+        })
         xunitTestAssemblies
 
 //--------------------------------------------------------------------------------
@@ -182,7 +187,7 @@ let updateNugetPackages _ =
                     *)
                     ToolPath = nugetExe
                     OutputPath = "./packages"
-                    
+
                     }) config
 
 Target "UpdateDependencies" <| fun _ ->
