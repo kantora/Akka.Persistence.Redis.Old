@@ -9,7 +9,7 @@ cd `dirname ${SCRIPT_PATH}` > /dev/null
 SCRIPT_PATH=`pwd`;
 popd  > /dev/null
 
-mono $SCRIPT_PATH/src/.nuget/NuGet.exe update -self
+#mono $SCRIPT_PATH/src/.nuget/NuGet.exe update -self
 
 mono $SCRIPT_PATH/src/.nuget/NuGet.exe install FAKE -OutputDirectory $SCRIPT_PATH/src/packages -ExcludeVersion -Version 3.28.8
 

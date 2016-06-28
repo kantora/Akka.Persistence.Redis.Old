@@ -2,7 +2,7 @@
 
 pushd %~dp0
 
-src\.nuget\NuGet.exe update -self
+@rem src\.nuget\NuGet.exe update -self
 
 src\.nuget\NuGet.exe install FAKE -OutputDirectory packages -ExcludeVersion 
 
